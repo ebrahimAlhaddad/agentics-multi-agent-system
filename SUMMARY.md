@@ -1,18 +1,22 @@
 # Agentics — Technical Overview
-Author: Ebrahim alhaddad
-
-Date: 07/31/2026
+Author: Ebrahim Alhaddad
 
 > A multi-agent orchestration system demonstrated through exploratory data analysis.
 > The analysis is the **load**. The orchestration is the **product**.
 
-Agentics turns a natural-language data question into a validated task graph, pauses for human approval, executes independent tasks through queue-backed workers, persists every intermediate result as a scoped artifact, and synthesises the final answer from the completed graph.
+Agentics turns a natural-language data question into a validated task graph, pauses for human approval, executes independent tasks through queue-backed workers, persists every intermediate result as a scoped artifact, and synthesizes the final answer from the completed graph.
 
 The project is intentionally not another “chat with a CSV” interface. It focuses on the engineering underneath an agent workflow: decomposition, isolation, scheduling, verification, retries, persisted state, and recovery when work outlives the request that created it.
 
-**Current posture:** built and tested locally with Docker Compose. The services and adapters are separated so they map naturally to managed queues, Postgres, object storage, and independently scaled container workloads. A production cloud deployment has not yet been completed.
+**Current posture:** implemented and tested locally with Docker Compose as
+separate API, orchestrator, and task-worker processes using PostgreSQL and
+SQS-compatible ElasticMQ. The queue and storage adapters map to AWS SQS and S3,
+but the complete managed deployment—including separate orchestrator and worker
+services, queue provisioning, autoscaling, and production operations—has not
+yet been completed.
 
-**Stack:** Python · FastAPI · Postgres · SQS/ElasticMQ · local/S3 storage · Cognito · Docker Compose · Next.js
+**Stack:** Python · FastAPI · PostgreSQL · SQS/ElasticMQ · local/S3 storage ·
+OpenAI Agents SDK · Cognito · Docker Compose · Next.js · AWS CDK
 
 [Read the full design document](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md)
 
@@ -29,9 +33,9 @@ Agent demos are easy because the happy path is short: give a model a tool and sh
 5. **Recovery** — persist enough state to retry, supersede, or resume work after process and delivery failures.
 6. **Control** — let a human inspect the proposed plan before execution work is dispatched.
 
-These are primarily distributed-systems concerns with models embedded inside them. The design therefore keeps model judgement where judgement is useful and moves scheduling, state transitions, dependency resolution, and structural validation into deterministic code.
+These are primarily distributed-systems concerns with models embedded inside them. The design therefore keeps model judgment where judgment is useful and moves scheduling, state transitions, dependency resolution, and structural validation into deterministic code.
 
-> **The model proposes the plan; specialised agents execute it over deterministic scheduling machinery.**
+> **The model proposes the plan; specialized agents execute it over deterministic scheduling machinery.**
 
 Analytics is a useful test load because its failures are not flattering. Python can execute successfully while answering the wrong question, intermediate computations naturally fan out across segments or cohorts, and realistic work can outlive one HTTP request. That forces the system to address both mechanical correctness and semantic review.
 
@@ -73,7 +77,7 @@ The API, orchestrator, and task workers are separate processes. Postgres is the 
 
 ---
 
-## Agents: judgement at the edges, code in the middle
+## Agents: judgment at the edges, code in the middle
 
 The orchestrator is deliberately **not** an agent. Models decide what work should exist and judge whether results answer the task. Code decides which task is eligible, whether a graph contains a cycle, whether an output was actually produced, and when a run is drained.
 
@@ -99,7 +103,6 @@ The plan is generated through constrained structured output, but schema complian
 | Acyclic graph | Deadlocked execution |
 | Known worker roles | Tasks with no executable handler |
 | Reachable consumed artifacts | Tasks requesting outputs no ancestor can produce |
-| Exactly one terminal role | Runs with no final answer or competing final answers |
 
 Only structurally valid plans reach the semantic validator. That second model checks what topology alone cannot: whether the proposed work addresses the actual question, uses available columns, decomposes independent calculations, and gives each task a checkable acceptance condition.
 
@@ -152,9 +155,17 @@ flowchart TB
   R -->|"round limit reached"| F["task failed"]
 ```
 
-The sandbox exposes a deliberately small surface: `pd`, `load(name)`, `emit(name, value)`, and an output directory. It runs without database access, cloud credentials, or network access. Every execution starts in a fresh process.
+The sandbox exposes a deliberately small surface: `pd`, `load(name)`,
+`emit(name, value)`, and an output directory. Every execution starts in a fresh
+subprocess with an isolated working directory, an allowlisted environment, no
+database handles, and no cloud credentials.
 
-Before a review model is called, code verifies that the analyst emitted every artifact named in `produces`. This cheap check prevents a task from reporting success while leaving its dependants permanently unable to run.
+This protects the application from accidental or poorly behaved generated code;
+it is not a security boundary against a determined adversary. Strong network and
+filesystem isolation would require execution in a dedicated container or compute
+sandbox.
+
+Before a review model is called, code verifies that the analyst emitted every artifact named in `produces`. This cheap check prevents a task from reporting success while leaving its dependents permanently unable to run.
 
 The review step then evaluates the result against the task description and acceptance criteria. Execution success alone is insufficient: a valid `groupby` on the wrong field is still a wrong answer.
 
@@ -363,9 +374,13 @@ flowchart LR
   L6 -.->|"storage backend configuration"| C6
 ```
 
-Local development uses ElasticMQ through the SQS API and enables strict queue limits to catch some incompatible behaviour early. Storage is selected behind a local/S3 interface. The API, orchestrator, and task consumer use the same application image with separate entry points, keeping deployment units consistent while preserving process isolation.
+Local development uses ElasticMQ through the SQS API and enables strict queue limits to catch some incompatible behavior early. Storage is selected behind a local/S3 interface. The API, orchestrator, and task consumer use the same application image with separate entry points, keeping deployment units consistent while preserving process isolation.
 
-This is an architectural mapping, not a claim that production deployment is complete. Infrastructure provisioning, operational dashboards, secrets management, autoscaling policies, and production load validation remain to be built.
+This is an architectural mapping, not a claim that the complete production
+topology is deployed. The repository includes AWS CDK infrastructure for part
+of the managed environment, but SQS provisioning, separate orchestrator and
+worker services, worker autoscaling, operational dashboards, reconciliation
+jobs, and production load validation remain to be completed.
 
 ---
 
@@ -421,9 +436,13 @@ The service layer contains the application logic without HTTP concerns. `externa
 
 ## Use of AI
 
-AI was used extensively to accelerate frontend work, tests, and documentation. It also assisted with Routine implementation, refactoring, and debugging. The architecture, state machines, service boundaries, queue semantics, artifact model, and failure-handling decisions were directed and reviewed by the author.
+AI-assisted tools were used to accelerate portions of frontend implementation,
+testing, documentation, refactoring, and debugging.
 
-Generated code was read, executed, modified, and removed when it did not fit the system. Backend design and implementation is driven by Author
+I designed and reviewed the architecture, state machines, service boundaries,
+queue semantics, artifact model, validation strategy, execution model, and
+failure-handling approach. Generated code was treated as a draft: it was read,
+executed, tested, modified, and removed when it did not fit the system.
 
 ---
 
@@ -432,7 +451,7 @@ Generated code was read, executed, modified, and removed when it did not fit the
  The repository demonstrates work across several layers:
 
 - **Distributed workflow design:** persisted DAGs, queue consumers, redelivery, retries, conditional claims, and terminal-state handling.
-- **Agent-system boundaries:** model judgement for planning and review; deterministic code for topology, scheduling, completeness, and state transitions.
+- **Agent-system boundaries:** model judgment for planning and review; deterministic code for topology, scheduling, completeness, and state transitions.
 - **Data isolation:** logical artifact handles, scoped staging, storage abstraction, and sandboxed execution.
 - **Failure analysis:** explicit treatment of duplicate delivery, stale work, database-to-queue gaps, visibility windows, and recovery mechanisms.
 - **Deployable process boundaries:** separate API, orchestration, and compute roles with queue-depth-based scaling paths.

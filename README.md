@@ -4,7 +4,7 @@
 
 Upload a CSV and describe what you want to learn. Agentics inspects the data, proposes an execution plan, pauses for human approval, and dispatches the approved graph to independent workers. Analyst agents generate and run Python against scoped inputs, while deterministic services control scheduling, validation, persistence, retries, and state transitions.
 
-![Agentics preview](PREVIEW.gif)
+![Agentics preview](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/PREVIEW.gif)
 
 ## What happens during a run
 
@@ -53,8 +53,8 @@ The analysis is the demonstration workload. The engineering focus is the workflo
 
 ## Read the engineering details
 
-- [`SUMMARY.md`](SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
-- [`DESIGN.md`](DESIGN.md) — full implementation-level design and failure analysis
+- [`SUMMARY.md`](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
+- [`DESIGN.md`](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md) — full implementation-level design and failure analysis
 
 ## Current status
 

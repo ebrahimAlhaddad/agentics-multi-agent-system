@@ -9,7 +9,7 @@
 
 ### 1.1 The problem
 
-When an organisation decides to automate a function with agents — a reporting
+When an organization decides to automate a function with agents — a reporting
 team, a reconciliation desk, a support triage queue — the demo is easy and the
 system is hard. The demo is a model with a tool. The system is everything
 underneath it:
@@ -24,15 +24,22 @@ underneath it:
    the thing that produced it can be confidently wrong.
 5. **Recovery.** Surviving a worker that dies mid-task, a queue that delivers
    twice, and a deploy that restarts every process at once.
-6. **Control.** Putting a human in front of the expensive part, before the money
-   is spent rather than after.
+6. **Control.** Putting a human in front of the execution path after planning,
+   but before task workers incur the larger variable cost.
 
 None of those six are model problems. They are distributed-systems problems that
 happen to have a model inside them, and they are the same six whether the agents
 write pandas, file tickets, or reconcile invoices.
 
-This project builds those six. Choosing a domain is choosing a **test load** to
-exercise them, and the choice was deliberate.
+This project implements the core machinery for those six and makes the remaining
+recovery and production-hardening gaps explicit. Choosing a domain is choosing a
+**test load** to exercise them, and the choice was deliberate.
+
+Two core extensions remain in development. **Automatic graph improvement** will
+allow a run to re-plan after execution reveals failed, insufficient, or poorly
+decomposed work. **Metering** will attribute model and execution cost to each task
+and run while work is in progress, making cost visible before it becomes only an
+after-the-fact bill.
 
 ### 1.2 Why build it from scratch
 
@@ -49,20 +56,16 @@ notification, an analyst confidently summing a column it was never granted —
 are invisible when a vendor owns that layer. They are also exactly the failures
 that a team running this in production would have to diagnose themselves.
 
-There is a second reason, and it is the one that matters commercially: **at
-sufficient scale or sufficient integration depth, the ready-made option is often
-not available.**
+Managed platforms are often the right choice, but their boundary becomes visible
+when:
 
-| Constraint | Why the managed path closes |
-|---|---|
-| **Observability tooling leaks** | Hosted tracing and evaluation platforms commonly log full prompts and completions to their own servers — which is a data-egress event, not a debugging convenience ([Prem AI](https://blog.premai.io/ai-data-residency-requirements-by-region-the-complete-enterprise-compliance-guide/)) |
-| **Warehouse-bounded analytics** | The managed analytics agents are scoped to their own platform's data. Snowflake Cortex Analyst works only against Snowflake; Databricks Genie is structured-data only, caps a Genie Space at 30 tables, and needs a federation layer for anything outside Databricks ([Colrows](https://colrows.com/blogs/cortex-analyst-vs-genie/), [Infinisynapse](https://infinisynapse.com/en/blog/databricks-genie)) |
-| **Internal systems** | The interesting workloads read from services that exist only inside the company. Nothing hosted has a connector for a bespoke internal API, so the integration is yours to write regardless |
+- data cannot leave the organization's environment;
+- the workflow depends on bespoke internal systems;
+- execution, state transitions, and recovery semantics must be controlled directly;
+- the operating model requires infrastructure-level observability and isolation.
 
-So the ceiling on the managed path is real, and it is reached by exactly the
-workloads that are worth automating: high volume, internally integrated,
-compliance-bound. Building it once, by hand, is how you find out what that ceiling
-costs.
+Those are the workloads for which the orchestration layer stops being a product
+configuration problem and becomes part of the application itself.
 
 ### 1.3 Why analytics is the right test load
 
@@ -77,7 +80,7 @@ DSBench collects 540 tasks from ModelOff and Kaggle
 ~450 multi-step tasks derived from a financial analytics platform
 ([arXiv](https://arxiv.org/html/2506.23719v1)). The literature on those
 benchmarks is explicit that prior evaluation leaned on synthetic tasks,
-oversimplified scoring, or subjective judgement. That gap is the opportunity: the
+oversimplified scoring, or subjective judgment. That gap is the opportunity: the
 problem is not solved, and the evaluation apparatus is still being built.
 
 **Second: the failure mode is honest rather than flattering.**
@@ -101,7 +104,7 @@ It is also not a general-purpose agent framework. The boundary is explicit:
 
 > **The model proposes the plan; specialized agents collaborate over deterministic scheduling machinery**
 
-The planner uses model judgement because decomposition and task wording are not
+The planner uses model judgment because decomposition and task wording are not
 fully mechanical. The orchestrator does not use a model because dependency
 resolution, task eligibility, retries, and run termination are state-management
 problems.
@@ -114,7 +117,7 @@ The project currently demonstrates:
 - human approval before execution tasks are dispatched;
 - queue-backed workers and persisted task state;
 - named intermediate artifacts with scoped resolution;
-- analyst and synthesizer roles; coordinated and collaborating
+- analyst and synthesizer roles coordinated through persisted artifacts;
 - explicit task and run state machines.
 
 #### Comparison
@@ -123,18 +126,24 @@ The project currently demonstrates:
 | Unit of work | One question, one session | A task graph, many workers |
 | Concurrency | One conversation at a time | Independent tasks dispatched in parallel |
 | Duration | Seconds to a minute | Minutes to hours, across processes |
-| Failure | Ask again | Retry, rework, supersede, replan |
-| Spend control | After the fact | Human approves the plan first |
-| Audit | The transcript | Every claim traced to code, artifact, and reviewer verdict |
+| Failure | Ask again | Retry, rework, and supersede; automatic graph improvement through replanning is the next extension |
+| Execution-spend control | After execution begins | Human approves the task graph before workers are dispatched |
+| Cost visibility | Usually after the session | Per-run and per-task metering during execution is a core extension still in development |
+| Audit | The transcript | Persisted task state, intermediate artifacts, and reviewer and faithfulness verdicts |
 | Data reach | The vendor's platform | Wherever you can write a reader for |
 
 
 
 ### 1.5 Current deployment posture
 
-The system is built and tested locally with Docker Compose. Its process and
-adapter boundaries were chosen so that the same roles map naturally to managed
-infrastructure, but an actual cloud deployment has not yet been completed.
+The system is implemented and tested locally with Docker Compose as separate API,
+orchestrator, and task-worker processes using PostgreSQL and SQS-compatible
+ElasticMQ. The repository also contains AWS CDK infrastructure for part of the
+managed environment.
+
+The complete cloud topology has not yet been deployed. In particular, queue
+provisioning, separate orchestrator and worker services, worker autoscaling,
+reconciliation processes, and production operations remain incomplete.
 
 ```mermaid
 flowchart LR
@@ -153,7 +162,7 @@ flowchart LR
     A1["container service"]
     A2["orchestrator task"]
     A3["worker pool"]
-    A4["SQS-compatible queue"]
+    A4["Amazon SQS"]
     A5["managed Postgres"]
     A6["object storage"]
   end
@@ -183,26 +192,17 @@ boundaries visible during local development.
 
 ## 2. Notes on the use of AI
 
-AI was used extensively during implementation. The distinction that matters for
-this project is between accelerated production of code and ownership of the
-system's design and behaviour.
+AI-assisted tools were used to accelerate portions of frontend implementation,
+testing, documentation, refactoring, and debugging.
 
-| Area | How AI was used |
-|---|---|
-| **Documentation** | Editing, restructuring, docstrings, and code comments. |
-| **Tests** | Test generation and expansion, followed by review, execution, and pruning. |
-| **Frontend** | Used heavily to accelerate implementation of the demonstration interface. |
-| **Backend implementation** | Used collaboratively for routine implementation, refactoring, and debugging. |
-| **Architecture** | State machines, service boundaries, task and queue semantics, artifact scoping, and failure-handling decisions were directed and reviewed by the author. |
+I designed and reviewed the architecture, state machines, service boundaries,
+queue semantics, artifact model, validation strategy, execution model, and
+failure-handling approach. Generated code was treated as a draft: it was read,
+executed, tested, modified, and removed when it did not fit the system.
 
-Generated code was not treated as self-validating. It was read, run, changed, and
-removed where it did not fit the design. The repository therefore reflects a
-collaborative implementation process, with responsibility for the resulting
-architecture and behaviour remaining with the author.
-
-**The backend is the focus of the project.** The frontend exists to make the workflow
-observable: upload data, ask a question, inspect a plan, approve it, watch task
-progress, and read the result.
+**The backend is the focus of the project.** The frontend exists to make the
+workflow observable: upload data, ask a question, inspect a plan, approve it,
+watch task progress, and read the result.
 
 ---
 
@@ -332,20 +332,27 @@ flowchart LR
 | Shape | `artifact://<run_id>/<name>` | `<session_id>/<artifact_id>.<ext>` |
 | Built by | `ArtifactHandle.build` | `storage.key(...)`, validated |
 | Who sees it | Agents, plans, task rows | Only `artifact_service` and storage |
-| Stable across a re-plan? | Name is; the object behind it may be replaced | No — a new object, a new id |
+| Stable across a retry? | Yes — the logical name remains stable while its bytes may be replaced | The same artifact id and key are reused unless the output kind changes |
 | Purpose | A reference a model can reason about and never dereference | A location that deletes cleanly by prefix |
 
 **Names are qualified by their producer.** A task called `n_cohorts` writing
-`cohorts` produces `n_cohorts/cohorts`; an upload is `input/sales`. Uniqueness is
-then free — task ids are already unique per run, so two tasks cannot collide, and
-a re-plan's names are automatically distinct from the previous plan's. The
-constraint is `UNIQUE (session_id, run_id, name) NULLS NOT DISTINCT`
+`cohorts` produces `n_cohorts/cohorts`; an upload is named `input/sales`.
+Because task ids are unique within a run, sibling tasks may use the same local
+output name without colliding in persistent storage. The constraint is
+`UNIQUE (session_id, run_id, name) NULLS NOT DISTINCT`.
 
+When the same task rewrites an output during a review round or retry, the bytes
+behind the existing logical name are replaced. Downstream tasks can therefore
+continue referring to the same handle.
 
-The handle is **opaque on purpose**. An agent receives a reference, not bytes and
-not a path. It cannot read outside what its task declared
+The handle is **opaque on purpose**. Plans and task rows carry logical references,
+not filesystem paths or object-store keys. At execution time, the staging layer
+resolves only the artifacts listed in the task's `consumes` field and exposes
+them through `load(name)`.
 
-Regenerated artifacts update byte storage only while the handle remains the same. This simplifies coordination between nodes when artifacts are updated during multiple agent attempts
+This is application-level scoping, not a hardened filesystem security boundary.
+Generated code still runs within the task worker's container and requires stronger
+isolation before it should be treated as adversarial.
 
 ### 3.4 Wire shapes: message and delivery
 
@@ -378,8 +385,10 @@ is absent for anything concerning a whole run.
 - `receipt_handle` identifies **this delivery**, not the message. A redelivery
   carries a different one, and deleting requires the handle from the delivery you
   are actually finishing.
-- `receive_count` is `1` on first delivery, so **`> 1` means a previous consumer
-  took this and never deleted it** — the signal that a worker died mid-task.
+- `receive_count` is `1` on the first delivery. A value above one means an
+  earlier delivery was not deleted. That may indicate a process crash, handler
+  exception, visibility timeout, failed acknowledgment, or work that exceeded
+  its visibility window.
 
 ### 3.5 The state machines
 
@@ -425,20 +434,17 @@ stateDiagram-v2
 | `ACTIVE` | `running`, `validating` | In flight — never dispatch again |
 | `TERMINAL` | `done`, `failed`, `superseded` | Nothing further will happen |
 
+`validating` remains part of the task-status vocabulary, but the current analyst
+worker performs result review while the persisted task remains `running`. It is
+reserved for separating execution and validation into independently observable
+states later.
+
 `rework` exists as a state distinct from `pending` because a rejected task keeps
 its satisfied dependencies — it needs another attempt, not re-derivation.
 `superseded` marks work discarded because it consumed something that will now
 never exist.
 
 ### 3.6 Identity: how a request becomes a `user_id`
-
-Authentication is implemented with AWS Cognito. In authenticated mode, the API
-resolves a user identity from the supplied access token. Local development can
-use a fixed dummy identity when authentication is disabled.
-
-The current security model protects the HTTP boundary and scopes database access
-through sessions. It is not a complete internal zero-trust design; the remaining
-security work is described in Sections 3.6 and 7.4.
 
 ```mermaid
 sequenceDiagram
@@ -506,9 +512,12 @@ The direction:
   verify the publisher was the orchestrator and reject replays. The nonce is the
   part that matters — without it a captured message is re-executable forever.
 
-- **Separate credentials per role.** The sandbox already runs with no network, no
-  credentials, and no database. The workers around it do not yet have least
-  privilege of their own.
+- **Separate credentials per role.** The sandbox child receives no database
+  handles or cloud credentials and runs in a fresh subprocess with an allowlisted
+  environment and isolated working directory. It still shares the task worker's
+  container-level network and filesystem boundary; dedicated compute isolation
+  remains future work. The workers around it do not yet have least privilege of
+  their own.
 
 ---
 
@@ -607,7 +616,6 @@ checks what a model should never be trusted to check:
 | Unknown roles | The orchestrator would have nothing to dispatch to |
 | Cycles | Deadlock, and ancestry becomes meaningless |
 | Unreachable `consumes` | A task waiting on an artifact nobody will ever produce |
-| Terminal role present, exactly once | A run with no answer, or two of them |
 
 Ordering is **cheapest-first**: the validator is only ever called on a plan that
 already holds together, so a dangling dependency never costs a model call.
@@ -617,7 +625,7 @@ and it would see whatever draft it was handed rather than the answer that
 actually comes back — so an agent could validate one graph and emit another. The
 gate runs on `final_output`, outside the agent's reach.
 
-**Why the validator exists at all.** Structure is not judgement. It cannot tell
+**Why the validator exists at all.** Structure is not judgment. It cannot tell
 you that a plan answers a *different* question than the one asked, that a task
 depends on a column that isn't there, or that a task's description is too vague
 to implement. Its rejection reason is the entire content of the next attempt's
@@ -646,7 +654,7 @@ The plan is a schema (`models/plan.py`), enforced by constrained decoding — th
     {
       "id": "write_final_report",
       "role": "synthesizer",
-      "description": "Summarise which region leads and by how much.",
+      "description": "Summarize which region leads and by how much.",
       "acceptance": "names one region and cites the figure",
       "depends_on": ["calculate_average_revenue"],
       "consumes": ["average_revenue_per_region"],
@@ -686,8 +694,8 @@ flowchart TB
   ST --> W["model writes Python"]
   W --> R["run_python — sandbox<br/>fresh process every call"]
   R -->|"output, errors, traceback"| W
-  W --> G{{"completeness check — code<br/>did it write every artifact<br/>it declared in produces?"}}
-  G -->|"missing — it did not deliver"| W
+  W --> G{{"deterministic output checks — code<br/>are outputs usable and are all<br/>declared artifacts present?"}}
+  G -->|"invalid or missing"| W
   G -->|pass| RV["review agent<br/>judges result vs task"]
   RV -->|"rejected — feedback"| W
   RV -->|approved| E(["TaskOutcome DONE<br/>+ artifact names"])
@@ -696,35 +704,46 @@ flowchart TB
   style G stroke-width:3px
 ```
 
-The sandbox surface the model is given is four names — `pd`, `load(name)`,
-`emit(name, value)`, and an `out` directory — with **no database, no network, and
-no credentials**. A DataFrame emitted becomes a table, a dict becomes a chart
-spec, a string becomes text; anything written to `out` is picked up by filename.
+The model is given a small application surface: `pd`, `load(name)`,
+`emit(name, value)`, and an output directory. Every execution starts in a fresh
+subprocess with an isolated working directory and an allowlisted environment.
+No database handles or cloud credentials are exposed. A DataFrame emitted becomes
+a table, a dict becomes a chart specification, a string becomes text, and files
+written to the output directory are collected by filename.
+
+This is intended to contain accidental and poorly behaved generated code. It is
+not a hardened boundary against a determined adversary because the subprocess
+still shares the worker container's network and broader operating-system
+boundary.
 
 Two properties are stated to the model explicitly because they otherwise cause
 silent wrong answers: every call is a **fresh process**, so nothing survives
 between calls; and it is given the *whole* of each input, so it should look
 before it computes.
 
-The one deterministic gate is **completeness**, in code, before the review agent
-is called: every name the task declared in `produces` must actually have been
-written, or the round fails with `declared [...] but produced [...]`. It is
-cheap, it is the failure that strands everything downstream, and it costs no
-model call.
+Two deterministic gates run before semantic review.
 
-> **Known drift:** the review agent's prompt still tells it that "something
-> automatic has already confirmed the code ran and that the results are not
-> empty or degenerate". That was `validation_service`, which no longer exists —
-> only the completeness check survives. The prompt is currently claiming a
-> guarantee nothing provides.
+First, every emitted output is checked before persistence.
+`ExecutionResult.check()` rejects outputs that are missing, empty, all-null,
+structurally degenerate, or otherwise unusable for their declared artifact kind.
+
+Second, after the analyst finishes, the worker checks that every artifact named
+in the task's `produces` field exists. This prevents a task from reporting
+success while leaving downstream work permanently unable to run.
+
+Only after those mechanical checks pass does the reviewer agent judge what code
+cannot: whether the result answers the specified task, is plausible for the
+available data, and satisfies the acceptance criterion.
 
 Bounded by `MAX_REVIEW_ROUNDS = 2` and `MAX_TURNS = 10`. Past that it isn't
 converging, and the queue's retry is the better mechanism.
 
-The analyst reviews **its own** result before reporting success, which is why
-there is no separate critic role in a plan. A critic node was tried and removed:
-it doubled graph size to re-check something the worker was better placed to
-check, having actually seen the data
+The analyst worker invokes a separate reviewer agent before reporting success.
+The reviewer cannot run code or redesign the analysis; it judges the persisted
+result against the task and acceptance criterion. This is why there is no
+separate critic node in the plan. A critic node was tried and removed: it doubled
+graph size to re-check something the worker was better placed to review, having
+actually seen the data.
 
 #### synthesizer — draft, then check
 
@@ -736,9 +755,14 @@ flowchart LR
   F -->|clean| O(["terminal artifact<br/>+ faithfulness note"])
 ```
 
-`TERMINAL = True`, so exactly one of these ends a run. The faithfulness check is
-a second model reading the report against the results it was given, and its note
-is stored alongside the report — the run's answer arrives with its own audit.
+The synthesizer role is marked `TERMINAL = True`, and the planner is instructed
+to include one terminal task that depends on the required analytical work.
+Deterministic enforcement of exactly one terminal role remains to be added to
+DAG validation.
+
+The faithfulness check is a second model reading the report against the results
+it was given, and its note is stored alongside the report — the run's answer is
+stored with the faithfulness review note.
 
 #### Where the power is, and what is deliberately missing
 
@@ -760,8 +784,8 @@ flowchart TB
 ```
 
 A general-purpose analyst writing arbitrary Python is the *weakest* version of
-this. The power is in a **library of skills** — parameterised, tested flows a
-planner selects rather than a model improvising — and in specialised roles with
+this. The power is in a **library of skills** — parameterized, tested flows a
+planner selects rather than a model improvising — and in specialized roles with
 richer tools. The contract is already there to hang them on. This is where the
 work goes next.
 
@@ -769,7 +793,9 @@ work goes next.
 
 ## 5. The orchestrator
 
-Approval is the boundary. Nothing is spent until a human has seen the plan.
+Approval is the execution boundary. The conversational planner and plan
+validator have already made model calls, but no analysis task is dispatched
+until a human has inspected and approved the task graph.
 
 ```mermaid
 sequenceDiagram
@@ -812,15 +838,25 @@ from the task rows. That single choice buys almost everything else:
 
 | Property | Consequence |
 |---|---|
-| **Level-triggered** | Duplicates are free — a redelivery costs one wasted query |
+| **Level-triggered** | Duplicate advances are cheap and normally idempotent — a redelivery generally costs another state read |
 | **Stateless handler** | No state rides in the message and none is held by the handler |
-| **Resumable** | A process can die between any two steps; the next advance rebuilds |
+| **State-reconstructing** | Any later advance rebuilds the decision from Postgres rather than relying on in-memory workflow state |
 | **No callbacks** | A worker's completion *is* a message on the runs queue |
 
 `advance` is a **handler, not a loop**: load state, make one decision, publish,
-return. It never waits, and it makes **no model call at all** — replanning is
-itself a dispatched role. What it does is entirely determined by the task rows,
-which makes it deterministic and testable.
+return. It never waits, and it makes **no model call at all**. What it does is
+entirely determined by the task rows, which makes it deterministic and testable.
+
+Mid-execution replanning is not yet implemented. It is intended as **automatic
+graph improvement**: after active work drains, a separately dispatched replanner
+would inspect failed, insufficient, or poorly decomposed work and propose a
+replacement graph rather than embedding model behavior in the state-transition
+handler.
+
+Metering is likewise a core extension still in development. Planner, model,
+sandbox, and worker activity will be attributed to tasks and runs so cost can be
+observed during execution and eventually governed by budgets. Metering should
+observe workflow transitions without becoming part of the scheduling decision.
 
 ### 5.2 One advance, in order
 
@@ -858,13 +894,14 @@ UPDATE run_tasks
 
 Two advances can be in flight for the same run — a duplicate delivery, or two
 orchestrator processes. Both read task 7 as `pending`; both try to dispatch it.
-Postgres serialises the two updates, the first flips the row, the second matches
+Postgres serializes the two updates, the first flips the row, the second matches
 **zero** rows and skips.
 
 **No queue property is relied on to keep them apart.** Correctness comes from a
-row-level compare-and-set. FIFO ordering and visibility timeouts reduce how often
-the race happens; the `WHERE` clause is what makes it safe. This is the whole of
-what makes horizontal scaling of the orchestrator sound.
+row-level compare-and-set. Visibility timeouts may reduce overlapping deliveries,
+but they do not provide ownership. The conditional `WHERE` clause is what makes
+concurrent orchestrator claims safe. This is the whole of what makes horizontal
+scaling of the orchestrator sound.
 ### 5.4 Queue layout
 
 | | `runs` queue | `tasks` queue |
@@ -886,7 +923,7 @@ longer require visibility extension or a separate lease/heartbeat mechanism.
 Without it, a task may be redelivered while the original worker is still active.
 
 
-### 5.5 Acknowledgement behaviour
+### 5.5 Acknowledgment behavior
 
 A consumer deletes a message only after its handler returns successfully. If the
 handler raises, the message is left on the queue and may be delivered again after
@@ -915,6 +952,12 @@ The current implementation has two important database-to-queue gaps:
 
 There is currently no sweeper or transactional outbox. A run can therefore become
 stranded even though all state required to recover it remains in Postgres.
+
+At-least-once delivery also means that a task message may execute more than once.
+The current message does not carry an attempt or lease token, and the worker does
+not condition its final write on still owning the active attempt. A delayed or
+overlapping delivery may therefore execute again or commit after newer work.
+Attempt-scoped commits and leases are required to close that gap.
 
 A complete recovery design should include some combination of:
 
@@ -998,44 +1041,52 @@ Ordered roughly by how much each one is currently hurting.
 
 ### Reliability
 
-- **A sweeper.** The gap in §5.5. This is what separates deployable from demo.
+- **A sweeper.** The recovery gaps described in §5.6. This is what separates
+  deployable from demo.
 - **More nuanced exceptions.** Right now too much collapses into a generic
   service-layer error, which means the orchestrator's retry decision is coarser
   than it should be. A model refusing a task, a sandbox timing out, a transient
   database error, and a genuinely impossible task should not all be one shape —
   only some of them are worth retrying, and the retry ladder can't currently
   tell them apart.
-- **Re-planning mid-execution.** The design is settled and unbuilt: never replan
-  into a moving graph and never cancel. Set a run-level `replan_pending` flag,
-  dispatch nothing while `ACTIVE` tasks remain, and let the last worker's advance
-  trigger the replanner as a dispatched role. The flag-set must *fall through* to
-  the drain check, or a lone failure hangs the run. Retry exhaustion, not a
-  single failure, is what triggers it.
+- **Automatic graph improvement through mid-execution replanning.** This is a
+  core capability still to be built: never replace a moving graph and never
+  cancel active work. Set a run-level `replan_pending` flag, dispatch nothing
+  while `ACTIVE` tasks remain, and let the last worker's advance trigger a
+  separately dispatched replanner. The replanner should use failed, insufficient,
+  or poorly decomposed work to propose a better graph. The flag-set must *fall
+  through* to the drain check, or a lone failure hangs the run. Retry exhaustion,
+  not a single failure, is what triggers it.
 
 ### Agents
 
-- **A skills library.** Fixed, parameterised, tested flows the planner selects
+- **A skills library.** Fixed, parameterized, tested flows the planner selects
   instead of a model improvising pandas. This is the single biggest lever.
-- **Specialised roles** — an EDA agent and a modeling agent, rather than one
+- **Specialized roles** — an EDA agent and a modeling agent, rather than one
   general analyst.
-- **Better parallelisation.** The planner now has a decomposition criterion, but
+- **Better parallelization.** The planner now has a decomposition criterion, but
   the axis it decomposes along is still emergent rather than expressed. Fan-out
   across segments, files, or features should be a first-class shape.
-- **Harden artifact naming.** Qualified names removed the collision class, but
-  the planner is the only thing guaranteeing a consumed name matches a produced
-  one. It has been reliable in testing and is not strong enough for harder
-  problems.
+- **Preserve qualified names during staging.** Persistent artifact names include
+  their producer, but `artifact_service.stage()` currently strips that prefix.
+  Consuming both `task_a/result` and `task_b/result` would stage each as `result`,
+  allowing one to overwrite the other. The sandbox input contract needs
+  collision-free local aliases.
 
 ### Data and output
 
 - **A formal data quality report.** The profile is currently types, nulls,
   cardinality, and ranges. It should be a real DQR — and, more importantly, one
-  with **interpretation** attached, so downstream agents inherit judgement about
+  with **interpretation** attached, so downstream agents inherit judgment about
   the data rather than raw statistics.
 - **Real output handling.** Charts are stored as specifications and nothing
   renders them; frames are parquet but the answer that reaches the user is plain
   text. Charts, tables, and downloadable parquet should all be first-class in the
   report.
+- **Persist accepted execution code.** Outputs are produced by executed Python,
+  but the successful analyst conversation is cleared and the accepted code is
+  not retained as a first-class artifact. Persisting the final accepted program
+  would support genuine result-to-code provenance.
 
 ### Security
 
@@ -1047,6 +1098,9 @@ Ordered roughly by how much each one is currently hurting.
   reject replays instead of trusting the network.
 - **Capability-scoped artifact handles**, so access fails closed on a bad token
   rather than relying on every query remembering to scope itself.
+- **Dedicated execution isolation.** Move generated code into a container or
+  purpose-built compute sandbox with explicit network, filesystem, CPU, memory,
+  and process limits.
 
 ### Infrastructure
 
@@ -1055,8 +1109,13 @@ Ordered roughly by how much each one is currently hurting.
   resourced for the job — heavier CPU, GPU where modeling needs it — so that
   compute-hungry execution scales independently of orchestration and cannot
   starve it.
-- **Metering.**
-- **Actually deploy it.** No AWS account is provisioned yet.
+- **Metering and budgets.** Attribute model tokens and cost, sandbox duration,
+  retries, and worker time to each task and run as execution happens. Surface the
+  cumulative total during a run and use it later for alerts, approval estimates,
+  and enforceable budget limits. This is a core capability still in development.
+- **Complete and deploy the managed topology.** The current CDK covers part of
+  the environment, but does not yet provision the SQS queues or separate
+  orchestrator and task-worker services represented in this design.
 
 ---
 
@@ -1067,6 +1126,7 @@ the deliberate cost. Every piece of it — the claim, the level-triggered advanc
 the DLQ, the opaque handle, the pure/IO split — exists because of what happens
 when work is parallel, long-running, and has to survive a process dying.
 
-The honest summary: for one person analysing one file, a chat tool wins. For an
-organisation running the same question across a thousand of them, with an audit
-trail and a human gate on spend, this is the shape the problem actually has.
+The honest summary: for one person analyzing one file, a chat tool wins. For an
+organization running the same question across a thousand of them, with persisted
+evidence and a human gate before execution, this is the shape the problem
+actually has.
