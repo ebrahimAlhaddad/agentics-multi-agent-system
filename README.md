@@ -53,8 +53,8 @@ The analysis is the demonstration workload. The engineering focus is the workflo
 
 ## Read the engineering details
 
-- [`SUMMARY.md`](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
-- [`DESIGN.md`](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md) — full implementation-level design and failure analysis
+- [Technical Design Summary](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
+- [Technical Design Deep Dive](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md) — full implementation-level design and failure analysis
 
 ## Current status
 
