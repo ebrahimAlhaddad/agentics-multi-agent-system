@@ -89,23 +89,36 @@ problem is not solved, and the evaluation apparatus is still being built.
 | **Naturally parallel** | One question across many segments, files, or cohorts is fan-out that is not decorative |
 | **Naturally long-running** | Minutes today; hours once a task pulls a real dataset, fits a model, or fans out across hundreds of segments |
 
-That last row is the hinge. A request lasting minutes to hours, spanning six
-processes, cannot live in one HTTP handler's memory. Everything that makes this
-architecture necessary — retries, claims, stranded work, partial failure,
-resumption after a deploy — only becomes a real problem **once the work outlives
-the request that started it.** A system that answers in 200ms never has to solve
-any of it.
 
 ### 1.4 What this deliberately is not
 
-**It does not compete with hosted analysis tools on the interactive
-single-file case.** For one analyst exploring one CSV in a chat window, ChatGPT's
-data analysis mode, Cortex Analyst, or Genie are better, and this architecture is
-overkill. Saying otherwise would invite the obvious objection and deserve it.
+Agentics is not intended to replace an interactive notebook or a chat-based data
+analysis tool for a single, short question. It is intentionally more structured:
+questions become task graphs, intermediate outputs are persisted, and execution
+is separated from the request that initiated it.
 
-The dividing line is not capability, it is shape:
+It is also not a general-purpose agent framework. The boundary is explicit:
 
-| | Hosted chat analytics | This |
+> **The model proposes the plan; specialized agents collaborate over deterministic scheduling machinery**
+
+The planner uses model judgement because decomposition and task wording are not
+fully mechanical. The orchestrator does not use a model because dependency
+resolution, task eligibility, retries, and run termination are state-management
+problems.
+
+The project currently demonstrates:
+
+- conversational inspection of uploaded data;
+- model-generated plans represented as task rows;
+- deterministic DAG validation followed by semantic review;
+- human approval before execution tasks are dispatched;
+- queue-backed workers and persisted task state;
+- named intermediate artifacts with scoped resolution;
+- analyst and synthesizer roles; coordinated and collaborating
+- explicit task and run state machines.
+
+#### Comparison
+| | Hosted chat analytics | A more mature version of this |
 |---|---|---|
 | Unit of work | One question, one session | A task graph, many workers |
 | Concurrency | One conversation at a time | Independent tasks dispatched in parallel |
@@ -115,94 +128,93 @@ The dividing line is not capability, it is shape:
 | Audit | The transcript | Every claim traced to code, artifact, and reviewer verdict |
 | Data reach | The vendor's platform | Wherever you can write a reader for |
 
-It is also **not an agent framework**, and not trying to be. The useful
-distinction from the orchestration literature: if you can draw the flowchart in
-advance you want a workflow engine; if the model decides the next step you want
-an agent runtime — and conflating them is where teams get into trouble, "asking
-a scheduler to behave like a runtime, or an agent framework to behave like a
-database" ([Datum Labs](https://medium.com/datumlabs/orchestration-showdown-airflow-vs-dagster-vs-temporal-in-the-age-of-llms-758a76876df0)).
-
-This system sits deliberately in between, and is explicit about which half is
-which: **the model decides the plan; code executes it.** The planner is a model
-because decomposition is judgement. The orchestrator is code — it makes no model
-call at all — because scheduling, parallelism, and termination fall out of
-`depends_on` for free, and making them prompt-dependent would be strictly worse.
 
 
-### 1.5 Deployment posture
+### 1.5 Current deployment posture
 
-Built and tested locally; **designed throughout as if already deployed**. Nothing
-is in-process that would have to be pulled apart later.
+The system is built and tested locally with Docker Compose. Its process and
+adapter boundaries were chosen so that the same roles map naturally to managed
+infrastructure, but an actual cloud deployment has not yet been completed.
 
 ```mermaid
 flowchart LR
-  subgraph LOCAL["running today — docker compose"]
+  subgraph LOCAL["running locally — Docker Compose"]
     direction TB
     L1["FastAPI container"]
     L2["orchestrator container"]
-    L3["worker container"]
+    L3["task worker container"]
     L4["ElasticMQ"]
     L5["Postgres"]
-    L6["local disk"]
+    L6["local storage"]
   end
 
-  subgraph AWS["designed for — no code change"]
+  subgraph TARGET["corresponding managed services"]
     direction TB
-    A1["ECS / Fargate service"]
-    A2["ECS task"]
-    A3["ECS task, scaled by queue depth"]
-    A4["SQS"]
-    A5["RDS"]
-    A6["S3"]
+    A1["container service"]
+    A2["orchestrator task"]
+    A3["worker pool"]
+    A4["SQS-compatible queue"]
+    A5["managed Postgres"]
+    A6["object storage"]
   end
 
   L1 -.-> A1
   L2 -.-> A2
   L3 -.-> A3
-  L4 -.->|"same wire protocol"| A4
+  L4 -.-> A4
   L5 -.-> A5
-  L6 -.->|"storage backend swap"| A6
+  L6 -.-> A6
 ```
 
-Two decisions make that arrow honest rather than aspirational:
+Two implementation choices support that mapping:
 
-- **ElasticMQ speaks the real SQS protocol.** Local and deployed differ by an
-  endpoint URL. `sqs-limits = strict` in the config, so it rejects what real SQS
-  rejects — the local environment says *no* in the same places production does.
-  An in-memory queue would have been the tidier-than-production environment that
-  has burned this project before.
-- **Storage is an interface with two implementations** (`local`, `s3`) already
-  written, selected by config.
+- **The queue adapter uses the SQS API.** Local development uses ElasticMQ, and
+  the queue endpoint is configurable. Strict queue limits are enabled locally to
+  catch some incompatibilities earlier.
+- **Storage is behind an interface.** Local and S3-backed implementations are
+  selected by configuration.
 
-Every process runs from the same image and boots every external service, so
-there is no "works in the API but not in the worker" class of bug.
+The API, orchestrator, and task worker are built from the same application image
+but run as separate processes with separate entry points. This keeps process
+boundaries visible during local development.
+
 
 ---
 
 ## 2. Notes on the use of AI
 
-Stated plainly, because a project that hides this is less interesting
-than one that doesn't.
+AI was used extensively during implementation. The distinction that matters for
+this project is between accelerated production of code and ownership of the
+system's design and behaviour.
 
 | Area | How AI was used |
 |---|---|
-| **Documentation** | USed for editing this docuemnt, and generating docstrings and code comments |
-| **Tests** | Heavily. Test generation, then reviewed and pruned by hand |
-| **Frontend** | Heavily. It is deliberately not where the effort goes |
-| **Backend architecture** | Directed by hand. Decisions, boundaries, and the queue design are mine; implementation is collaborative when it makes sense|
+| **Documentation** | Editing, restructuring, docstrings, and code comments. |
+| **Tests** | Test generation and expansion, followed by review, execution, and pruning. |
+| **Frontend** | Used heavily to accelerate implementation of the demonstration interface. |
+| **Backend implementation** | Used collaboratively for routine implementation, refactoring, and debugging. |
+| **Architecture** | State machines, service boundaries, task and queue semantics, artifact scoping, and failure-handling decisions were directed and reviewed by the author. |
 
-The focus is the **backend**. The frontend exists to make the backend
-demonstrable — upload, ask, approve, watch, read — and gets attention when there
-is time left over.
+Generated code was not treated as self-validating. It was read, run, changed, and
+removed where it did not fit the design. The repository therefore reflects a
+collaborative implementation process, with responsibility for the resulting
+architecture and behaviour remaining with the author.
 
-**This is a work in progress.** Section 8 is not a wish list; it is the list of
-things currently known to be missing or weak.
+**The backend is the focus of the project.** The frontend exists to make the workflow
+observable: upload data, ask a question, inspect a plan, approve it, watch task
+progress, and read the result.
 
 ---
 
-## 3. Data and schemas
+## 3. Data model and access boundaries
 
-Authentication is implemented using **Cognito**. `user_id` is fetched from the `JWT` token supplied over request header. During local runs, a dummy `user_id` is used. However, the data design assumes this field a reliable security token to validate data-access permissions. Indeed, a real system will require more authentication gates. This is a task for the future and, for now, we will center security around the `JWT`'s `user_id`
+Authentication is implemented with AWS Cognito. In authenticated mode, the API
+resolves a user identity from the supplied access token. Local development can
+use a fixed dummy identity when authentication is disabled.
+
+The current security model protects the HTTP boundary and scopes database access
+through sessions. It is not a complete internal zero-trust design; the remaining
+security work is described in Sections 3.6 and 7.4.
 
 ### 3.1 Core entities
 
@@ -218,7 +230,7 @@ erDiagram
 
     SESSIONS {
         uuid session_id PK
-        string user_id "the only link to a user"
+        string user_id "owner identity"
         string title
         datetime created
         datetime last_activity
@@ -226,23 +238,23 @@ erDiagram
     RUNS {
         uuid run_id PK
         uuid session_id FK
-        jsonb inputs "artifact ids this run may read"
-        string question "what was asked, in their words"
-        string approach "how the graph answers it"
+        jsonb inputs "artifact ids available to the run"
+        string question
+        string approach
         string status
         string error
     }
     RUN_TASKS {
         uuid run_id PK "also FK to runs"
-        string task_id PK "unique per run"
-        string role "which worker"
+        string task_id PK "unique within a run"
+        string role
         string description
-        string acceptance "checkable criterion"
+        string acceptance
         string status
         int attempts
-        array depends_on "the ONLY ordering"
-        array produces "named artifacts out"
-        array consumes "named artifacts in"
+        array depends_on
+        array produces
+        array consumes
         datetime started_at
         datetime finished_at
     }
@@ -251,10 +263,10 @@ erDiagram
         uuid session_id FK
         uuid run_id FK "NULL for uploads"
         string task_id "NULL for uploads"
-        string name "qualified: task_id/local"
+        string name "qualified logical name"
         string origin "input | transient | terminal"
         string kind "frame | chart | report | file"
-        string object_key "where the bytes live"
+        string object_key "storage location"
     }
     ARTIFACT_PROFILES {
         uuid artifact_id PK "also FK to artifacts"
@@ -263,10 +275,9 @@ erDiagram
     }
 ```
 
-
-**There is no stored plan.** `runs.plan` was once a JSONB column holding the same
-nodes the `run_tasks` rows already held. One representation per concept: **the
-rows are the plan**, and a node is rebuilt from a row on read.
+A plan is not stored twice. An earlier version kept both a JSON plan document and
+`run_tasks` rows. The JSON column was removed; the task rows are now the persisted
+representation of the plan and are reconstructed into model objects when needed.
 
 ### 3.2 The nesting, and the critical path
 
@@ -328,16 +339,13 @@ flowchart LR
 `cohorts` produces `n_cohorts/cohorts`; an upload is `input/sales`. Uniqueness is
 then free — task ids are already unique per run, so two tasks cannot collide, and
 a re-plan's names are automatically distinct from the previous plan's. The
-constraint is `UNIQUE (session_id, run_id, name) NULLS NOT DISTINCT`; the NULLS
-clause is load-bearing, since it is what makes the constraint bind uploads at all.
+constraint is `UNIQUE (session_id, run_id, name) NULLS NOT DISTINCT`
 
-Because a qualified name contains a slash, any route addressing one needs a
-`{name:path}` parameter.
 
 The handle is **opaque on purpose**. An agent receives a reference, not bytes and
-not a path. It cannot read outside what its task declared, and it cannot be
-prompt-injected into constructing a key, because it never constructs keys
-paths
+not a path. It cannot read outside what its task declared
+
+Regenerated artifacts update byte storage only while the handle remains the same. This simplifies coordination between nodes when artifacts are updated during multiple agent attempts
 
 ### 3.4 Wire shapes: message and delivery
 
@@ -424,8 +432,13 @@ never exist.
 
 ### 3.6 Identity: how a request becomes a `user_id`
 
-Every diagram above hangs off `sessions.user_id`. This is where that string comes
-from, and why it can be trusted once it exists.
+Authentication is implemented with AWS Cognito. In authenticated mode, the API
+resolves a user identity from the supplied access token. Local development can
+use a fixed dummy identity when authentication is disabled.
+
+The current security model protects the HTTP boundary and scopes database access
+through sessions. It is not a complete internal zero-trust design; the remaining
+security work is described in Sections 3.6 and 7.4.
 
 ```mermaid
 sequenceDiagram
@@ -455,34 +468,7 @@ sequenceDiagram
     end
 ```
 
-**What the token buys us.** The client sends a Cognito **access token** as a
-bearer credential. `CognitoService.get_user` extracts it and calls
-`cognito-idp:GetUser`, which returns a `CognitoUser`: `Username`, plus
-`UserAttributes` (email, sub, and whatever else the pool is configured to hold),
-`MFAOptions`, `PreferredMfaSetting`, and `UserMFASettingList`. Only `Username` is
-used — it becomes the `user_id` written on every session.
-
-The current implementation performs **token
-introspection**, not local JWT verification. It does not parse the token, read
-its `kid`, fetch the pool's JWKS, or check `exp`/`aud`/`iss` itself. It hands the
-token to Cognito and lets Cognito decide, which means an invalid or revoked token
-is caught immediately and correctly — but every authenticated request costs a
-network round trip to AWS, and the API's p99 latency becomes the auth service's
-p99 latency, because they are now the same number.
-
-The standard alternative is local verification: fetch the pool's JWKS once, cache
-the signing keys by `kid`, and verify the RS256 signature and claims in-process,
-refreshing on a cache miss so the issuer can rotate keys without breaking live
-traffic. That removes the round trip entirely, at the cost of a token staying
-valid until it expires. Most high-traffic systems converge on a hybrid: local
-verification on the hot path, introspection reserved for high-value operations or
-backed by a revocation list ([MojoAuth](https://mojoauth.com/blog/token-introspection-vs-jwt-verification-at-scale)).
-
-For a system whose requests take minutes to hours, one auth round trip is
-genuinely noise — so introspection is the right call *for now*, and the reason is
-worth writing down rather than leaving as an accident.
-
-**How the gate is enforced.**
+**How the gate is enforced:**
 
 1. **`user_id` is never accepted from the caller.** It is not a body field, not a
    query parameter, not a header we read. It exists only as the return value of a
@@ -528,9 +514,16 @@ The direction:
 
 ## 4. Agents
 
-Four agents, and **the orchestrator is not one of them**. Scheduling,
-parallelism, and termination fall out of `depends_on` for free; making them
-prompt-dependent would be strictly worse.
+
+The current system has four model-backed roles or review steps:
+
+- a chat agent;
+- a plan agent;
+- a plan validator;
+- execution roles for analysis and synthesis.
+
+The orchestrator is not an agent. It advances persisted state according to task
+statuses and dependencies.
 
 ```mermaid
 flowchart TB
@@ -558,15 +551,22 @@ flowchart TB
   style AP stroke-width:3px
 ```
 
-### 4.1 The chat agent
+### 4.1 Chat agent
 
-The conversational surface. It has the data tools and is told to look at the data
-before saying anything about it, because guessing is worse than asking. When it
-knows what the user wants, it calls `build_plan` — which is a *tool*, so
-replanning is just calling it again.
+The chat agent is the conversational entry point. It can inspect available input
+artifacts through a small tool surface:
 
-Streaming is SSE: one `data:` frame per text delta, plus tool-call lifecycle
-events so the UI can show what it is doing.
+- `list_inputs`;
+- `describe_input`;
+- `sample_rows`;
+- `column_values`;
+- `use_inputs`.
+
+It is instructed to inspect the data before making claims about its contents.
+When the request is sufficiently specified, it calls `build_plan`.
+
+Responses stream over server-sent events. Text deltas and tool-call lifecycle
+events allow the client to show both the response and the actions taken while
 
 ### 4.2 The adversarial pair, with code in the middle
 
@@ -623,13 +623,6 @@ depends on a column that isn't there, or that a task's description is too vague
 to implement. Its rejection reason is the entire content of the next attempt's
 correction prompt, so it is instructed to name the task and what to change.
 
-Its most recent job is **enforcing decomposition**. It previously had a criterion
-rejecting redundant tasks and none rejecting a task that bundles independent
-computations, plus an explicit instruction that a simpler plan is fine — so every
-incentive pushed node count *down*, and monolithic single-analyst plans sailed
-through. It now rejects a task that bundles computations which do not depend on
-each other, with the test being whether the parts could run at the same time and
-be checked separately.
 
 ### 4.3 What a plan looks like
 
@@ -872,39 +865,71 @@ Postgres serialises the two updates, the first flips the row, the second matches
 row-level compare-and-set. FIFO ordering and visibility timeouts reduce how often
 the race happens; the `WHERE` clause is what makes it safe. This is the whole of
 what makes horizontal scaling of the orchestrator sound.
+### 5.4 Queue layout
 
-### 5.4 Two queues, and why neither is FIFO
-
-| | `runs` | `tasks` |
+| | `runs` queue | `tasks` queue |
 |---|---|---|
-| Body | `{run_id}` | `{handler, run_id, task_id}` |
-| Meaning | "look at this run" | "execute this task" |
+| Body | `{handler, run_id}` | `{handler, run_id, task_id}` |
+| Meaning | Re-evaluate a run | Execute one task |
 | Type | Standard | Standard |
-| Visibility timeout | 30s — an advance is a query and some updates; longer means wedged | 300s — an analyst running generated code is the long pole |
-| Long poll | 20s | 20s |
-| DLQ after | 5 deliveries | 3 deliveries |
+| Visibility timeout | 30 seconds | 300 seconds |
+| Long poll | 20 seconds | 20 seconds |
+| DLQ threshold | 5 deliveries | 3 deliveries |
 
-**`tasks` is not FIFO** because the frontier is dispatched precisely *because*
-those tasks are independent. A FIFO group per run would serialise exactly the
-parallelism the DAG exists to express.
+The tasks queue is standard rather than FIFO because dependency ordering is
+already represented in the DAG. Tasks in the same eligible frontier are intended
+to run independently.
 
-### 5.5 Acknowledgement, and the gap that remains
+The current 300-second task visibility timeout is suitable only while individual
+handler executions remain within that operational assumption. Tasks that can run
+longer require visibility extension or a separate lease/heartbeat mechanism.
+Without it, a task may be redelivered while the original worker is still active.
 
-A handler that returns means the message is done and gets deleted. A handler that
-**raises leaves the message untouched**, so it reappears after the visibility
-timeout and eventually lands in the DLQ. Deleting in a `finally` would quietly
-discard the retry the queue is configured for.
 
-The task consumer always requests an advance, whatever the outcome — success,
-failure, or an unknown role — because the alternative is a run nobody will ever
-look at again.
+### 5.5 Acknowledgement behaviour
 
-**The known gap: there is no sweeper.** Writing a task's status and publishing
-its advance are two steps. A process dying between them strands the run: it stays
-`running`, no task is `running`, both queues are empty, and nothing will ever
-look at it again. This has been observed, not theorised. A sweeper that only
-looks for stale `running` tasks would not catch it — it must also re-advance any
-`running` run with no active tasks and nothing queued.
+A consumer deletes a message only after its handler returns successfully. If the
+handler raises, the message is left on the queue and may be delivered again after
+the visibility timeout. Repeated failures eventually move it to the configured
+DLQ.
+
+The task consumer requests another run advance after it records a handled
+outcome, including a failed outcome. This gives the orchestrator an opportunity
+to retry the task, supersede descendants, dispatch newly eligible work, or close
+the run.
+
+An unknown worker role is treated as a task failure rather than silently deleting
+the message and leaving the run unchanged.
+
+### 5.6 Known delivery and recovery gaps
+
+The current implementation has two important database-to-queue gaps:
+
+1. **Claim then publish.** The orchestrator marks a task `running` and then
+   publishes its task message. A process exit between those operations can leave
+   a running task with no corresponding queue message.
+2. **Outcome then advance.** A worker writes the task outcome and then publishes
+   an advance message. A process exit between those operations can leave a run
+   with updated task state but no message that causes the orchestrator to inspect
+   it again.
+
+There is currently no sweeper or transactional outbox. A run can therefore become
+stranded even though all state required to recover it remains in Postgres.
+
+A complete recovery design should include some combination of:
+
+- a transactional outbox for queue publications;
+- leases or attempt tokens for dispatched work;
+- visibility extension for long-running handlers;
+- idempotent artifact commits associated with an attempt;
+- a sweeper that re-examines stale active tasks and running runs with no active
+  progress;
+- reconciliation of DLQ entries with persisted run state.
+
+The present implementation demonstrates the main task-state transitions and
+conditional claims, but these gaps must be closed before treating it as a durable
+production workflow engine.
+
 
 ---
 
@@ -1030,7 +1055,7 @@ Ordered roughly by how much each one is currently hurting.
   resourced for the job — heavier CPU, GPU where modeling needs it — so that
   compute-hungry execution scales independently of orchestration and cannot
   starve it.
-- **Metering.** .
+- **Metering.**
 - **Actually deploy it.** No AWS account is provisioned yet.
 
 ---
