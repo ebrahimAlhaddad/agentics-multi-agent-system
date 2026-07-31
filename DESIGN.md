@@ -1,5 +1,6 @@
 # Agentics — Design
 **Author: Ebrahim Alhaddad**
+
 > A multi-agent orchestration system, demonstrated on exploratory data analysis.
 > The analysis is the **load**. The orchestration is the **product**.
 
