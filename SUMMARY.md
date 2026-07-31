@@ -1,5 +1,5 @@
 # Agentics — Technical Overview
-Author: Ebrahim Alhaddad
+**Author: Ebrahim Alhaddad**
 
 > A multi-agent orchestration system demonstrated through exploratory data analysis.
 > The analysis is the **load**. The orchestration is the **product**.
