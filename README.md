@@ -1,5 +1,12 @@
 # Agentics
 
+**Author: Ebrahim Alhaddad**
+
+## Read the engineering details
+
+- [Technical Design Summary](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
+- [Technical Design Deep Dive](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md) — full implementation-level design and failure analysis
+
 **A queue-backed multi-agent workflow system that turns natural-language data questions into approved, validated, and auditable task graphs.**
 
 Upload a CSV and describe what you want to learn. Agentics inspects the data, proposes an execution plan, pauses for human approval, and dispatches the approved graph to independent workers. Analyst agents generate and run Python against scoped inputs, while deterministic services control scheduling, validation, persistence, retries, and state transitions.
@@ -50,11 +57,6 @@ The analysis is the demonstration workload. The engineering focus is the workflo
 | Authentication | Amazon Cognito through Amplify, optional locally |
 | Local runtime | Docker Compose |
 | Infrastructure | AWS CDK, ECS/Fargate, RDS, Amplify, ECR/GitHub Actions |
-
-## Read the engineering details
-
-- [Technical Design Summary](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
-- [Technical Design Deep Dive](https://github.com/ebrahimAlhaddad/agentics-multi-agent-system/blob/main/DESIGN.md) — full implementation-level design and failure analysis
 
 ## Current status
 
