@@ -1,0 +1,73 @@
+name: Build & Push Docker Image to ECR
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'agentics/fastapi-prod' }}
+  IMAGE_TAG: latest
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./backend
+
+      - name: Tag Docker image for ECR
+        run: |
+          ECR_URI=$(aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text)
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_URI:$IMAGE_TAG
+          echo "ECR_URI=$ECR_URI" >> $GITHUB_ENV
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push $ECR_URI:$IMAGE_TAG
+
+
+      - name: Get ECS Cluster and Service names from CloudFormation exports
+        id: get-ecs-info
+        run: |
+          CLUSTER_NAME=$(aws cloudformation list-exports \
+            --region $AWS_REGION \
+            --query "Exports[?Name=='FastApiEcsClusterProdName'].Value" \
+            --output text)
+          SERVICE_NAME=$(aws cloudformation list-exports \
+            --region $AWS_REGION \
+            --query "Exports[?Name=='FastApiServiceProdName'].Value" \
+            --output text)
+          
+          echo "Cluster: $CLUSTER_NAME"
+          echo "Service: $SERVICE_NAME"
+
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Force ECS service to pull latest image
+        run: |
+          aws ecs update-service \
+            --cluster ${{ steps.get-ecs-info.outputs.cluster_name }} \
+            --service ${{ steps.get-ecs-info.outputs.service_name }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}

@@ -1,0 +1,134 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: api
+    env_file:
+      - .env
+      - .env.backend
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    volumes:
+      - ./backend:/app
+      # Artifacts and datasets are files. Without a volume they die with the
+      # container, leaving rows in Postgres pointing at bytes that no longer
+      # exist — which is exactly what happened to every run made before this.
+      - storage:/var/lib/agentics/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Consumes runs.fifo. Scaling this past a couple of replicas buys nothing:
+  # FIFO keeps one message per group in flight, so useful concurrency here is
+  # bounded by the number of runs in progress, and an advance is milliseconds.
+  orchestrator:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: consumer
+    command: python -m workers.orchestrator
+    env_file:
+      - .env
+      - .env.backend
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sqs:
+        condition: service_started
+    networks:
+      - app-network
+    # No restart policy yet: while the loop is new, a crash should stay visible
+    # rather than being hidden by a restart loop.
+
+  # Consumes tasks. This is the half worth scaling — `--scale worker=6` — since
+  # the queue has no message groups and the work is sandboxed code and model
+  # calls. It needs the storage volume for the same reason the API does.
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: consumer
+    command: python -m workers.task
+    env_file:
+      - .env
+      - .env.backend
+    volumes:
+      - ./backend:/app
+      - storage:/var/lib/agentics/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sqs:
+        condition: service_started
+    networks:
+      - app-network
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Local stand-in for SQS, speaking the real SQS wire protocol so the queue
+  # semantics that matter — redelivery, visibility timeouts, FIFO groups — are
+  # the same ones production will have. Deploying is an endpoint URL change.
+  sqs:
+    image: softwaremill/elasticmq-native
+    restart: unless-stopped
+    ports:
+      - "9324:9324"   # SQS API
+      - "9325:9325"   # built-in queue UI, handy for watching messages move
+    volumes:
+      - ./docker/elasticmq.conf:/opt/elasticmq.conf:ro
+    networks:
+      - app-network
+
+  # dynamodb-local:
+  #   image: amazon/dynamodb-local:latest
+  #   command: "-jar DynamoDBLocal.jar -sharedDb -dbPath ./data"
+  #   ports:
+  #     - "8005:8000"
+  #   volumes:
+  #     - "./docker/dynamodb:/home/dynamodblocal/data"
+
+  pgadmin:
+    image: dpage/pgadmin4
+    ports:
+      - "5050:${PGADMIN_PORT}"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  storage:
+    driver: local
+  pgdata:

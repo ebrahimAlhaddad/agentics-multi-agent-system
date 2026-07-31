@@ -1,0 +1,18 @@
+# Local build artifacts must never enter the image. __pycache__ compiled on the
+# host is for a different platform, and loading it produced a native-extension
+# TypeError that named neither Python nor the cache.
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+backend/.venv
+client/node_modules
+client/.next
+infrastructure/node_modules
+infrastructure/cdk.out
+tests/node_modules
+.git
+.env
+.env.*
+!.env*.example
