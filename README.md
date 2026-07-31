@@ -1,263 +1,222 @@
 # Agentics
 
-A multi-agent orchestration system, demonstrated on exploratory data analysis.
+**A queue-backed multi-agent workflow system that turns natural-language data questions into approved, validated, and auditable task graphs.**
 
-Upload a CSV, ask a question. A planner decomposes it into a task graph, you
-approve the plan before anything is spent, analysts write and run real Python in
-a sandbox, and every result is checked before it is used. The answer comes back
-with the code that produced it.
+Upload a CSV and describe what you want to learn. Agentics inspects the data, proposes an execution plan, pauses for human approval, and dispatches the approved graph to independent workers. Analyst agents generate and run Python against scoped inputs, while deterministic services control scheduling, validation, persistence, retries, and state transitions.
 
-The interesting part is the machinery around the model — planning, dispatch,
-scoped context, validation, recovery — not the analysis. See
-[`DESIGN.md`](DESIGN.md) for why, and for what it deliberately does not do.
+![Agentics preview](PREVIEW.gif)
 
----
+## What happens during a run
 
-## Run it locally
+1. **Inspect and plan** — a conversational planner profiles the uploaded data and converts the request into a typed DAG.
+2. **Validate and approve** — code checks graph structure and artifact flow; a semantic reviewer checks whether the plan can answer the question; the user approves it before analysis work begins.
+3. **Execute** — a deterministic orchestrator computes the eligible frontier and publishes tasks through SQS-compatible queues to separately running workers.
+4. **Verify and synthesize** — workers execute model-written Python in fresh subprocesses, persist declared artifacts, and review outputs before downstream tasks can consume them. A terminal agent writes the final report and performs a separate faithfulness check against the computed evidence.
 
-Needs Docker and Node. Only the LLM key needs a real value; **no AWS account is
-required**.
+## Why this is more than a “chat with a CSV” demo
 
-```bash
-# 1. Config
-cp .env.example .env
-cp client/.env.local.example client/.env.local
-cp .env.backend.example .env.backend
+The analysis is the demonstration workload. The engineering focus is the workflow system around the models:
 
-#    In .env set one provider:
-#      LLM_PROVIDER=openai      OPENAI_API_KEY=sk-...
-#    or LLM_PROVIDER=anthropic  ANTHROPIC_API_KEY=sk-ant-...
+- **Persisted orchestration** — plans become executable task rows in PostgreSQL; queue messages carry identifiers, not workflow state.
+- **Deterministic control plane** — models propose and judge work, while code owns DAG validation, dependency resolution, frontier scheduling, task claims, retries, and terminal-state handling.
+- **Real process boundaries** — the API, orchestrator, and task workers run as separate services, connected through ElasticMQ locally using the same SQS API used by AWS.
+- **Scoped data flow** — tasks declare what they consume and produce. Workers receive only those artifacts, addressed through logical handles rather than storage paths.
+- **Failure-aware execution** — conditional database claims prevent duplicate dispatch, failed tasks can be retried, unrecoverable descendants are superseded, and workflow state survives process boundaries.
+- **Auditable outputs** — generated code, intermediate artifacts, task attempts, final reports, and faithfulness notes are persisted for inspection.
 
-# 2. Backend + datastores. Migrations run automatically at startup.
-docker compose up -d
+## What this project demonstrates
 
-# 3. Frontend, in another terminal
-cd client && pnpm install && pnpm dev
-```
-
-Open **http://localhost:3000/wizard**, upload a CSV, ask a question.
-
-| | |
-|---|---|
-| Frontend | http://localhost:3000 |
-| Backend | http://localhost:8001 |
-| API docs | http://localhost:8001/docs |
-| pgAdmin | http://localhost:5050 |
-
-### Running the backend outside Docker
-
-Useful for debugging. `POSTGRES_HOST` and `REDIS_HOST` must be overridden because
-`.env` names the *compose* services, which only resolve inside the Docker network.
-
-```bash
-docker compose up -d postgres redis
-cd backend && pipenv install --dev
-POSTGRES_HOST=localhost REDIS_HOST=localhost \
-  pipenv run uvicorn app.main:app --port 8001
-```
-
----
-
-## Local vs deployed
-
-Nothing is mocked locally. The same code runs both ways — only where each
-dependency lives changes.
-
-| Concern | Local | Deployed | Chosen by |
-|---|---|---|---|
-| Database | Postgres container | RDS | `POSTGRES_HOST` |
-| Cache | Redis container | ElastiCache | `REDIS_HOST` |
-| Object storage | a directory on disk | S3 | `STORAGE_BACKEND` |
-| Auth | skipped entirely | Cognito | `DISABLE_AUTH` |
-| Model | OpenAI or Anthropic API | same | `LLM_PROVIDER` |
-| Code execution | subprocess sandbox | same | — |
-| Task dispatch | in-process asyncio | **same** — SQS is Stage 2, not built | — |
-| Frontend | `pnpm dev` | Amplify Hosting | — |
-
-Next.js reads `client/.env.local`, not the repo-root `.env` — and `NEXT_PUBLIC_*`
-values are inlined at build time, so restart `pnpm dev` after changing them.
-
-The frontend is **not containerised**: Amplify builds it from git, so a container
-for it would be a build path nothing else exercises.
-
-### How the code decides
-
-Every switch is a setting read once at startup — not a build flag, not a code
-path compiled out. One implementation per concern, selected behind an interface.
-
-**Object storage** — `StorageService.startup()` reads `STORAGE_BACKEND` and builds
-either `LocalStorageBackend` (a directory) or `S3StorageBackend`. Callers use
-`storage_service.put()/get()` and cannot tell which is underneath. The S3 module
-is imported lazily, so the local path never loads boto3.
-
-**Auth** — `DISABLE_AUTH=true` makes `CognitoService` skip creating a client
-entirely, so no AWS credentials are needed anywhere. The frontend has its own
-`NEXT_PUBLIC_DISABLE_AUTH` which stops `AuthProvider` mounting. **Both must
-agree** — the backend flag alone leaves the UI asking for a login it cannot
-perform.
-
-**The model** — `LLMService.startup()` reads `LLM_PROVIDER` and builds
-`ChatAnthropic` or `ChatOpenAI`. Only the selected provider's key is required; a
-missing one fails at startup naming the setting. The agents use only LangChain
-interfaces and are unaware of which is configured [CURRENTLY ONLY SUPPORTING OPENAI SDK]
-
-**Amplify outputs** — `client/amplify_outputs.json` is generated by Amplify and
-untracked, but webpack resolves it statically whether or not auth is on. The
-`dev`/`build` scripts write a stub first, which `lib/amplify.ts` detects to skip
-`Amplify.configure()`. That is why a fresh clone builds with no AWS account.
-
-**Migrations** — applied at startup in both environments, so a container starting
-against an empty database creates the schema itself.
-
----
-
-## What it costs
-
-The orchestration is not free. Most of the overhead is **per-run, not per-task**:
-
-| | Model calls |
-|---|---|
-| Planner | 1 (more if validation rejects the plan) |
-| Synthesizer, writing the report | 1 |
-| Faithfulness check | 1 |
-| **Fixed subtotal** | **~3** |
-| Analyst | 1 per task, plus retries |
-| Critic | 1 per task |
-
-Because the fixed part does not grow with the work, it amortises:
-
-| Tasks | Fixed | Work | Overhead |
-|---|---|---|---|
-| 1 | ~3 | 2 | ~60% |
-| 4 | ~3 | 8 | ~27% |
-| 20 | ~3 | 40 | ~7% |
-
-Nothing breaks at one task — a single-task run is correct, it simply has nothing
-to spread the fixed cost over.
-
-**The crossover:** does the work split into N independent units, each expensive
-enough that isolating a failure is worth paying for? At N of 1–3 and seconds
-each, a single agent wins. At N of 20+ and minutes each, this wins.
-
-Note what is *not* on that list: **data size**. A 10 GB file and one question
-needs chunking, not a task graph.
-
----
+- Backend and distributed-systems design
+- Agent orchestration with deterministic safety boundaries
+- Asynchronous queue consumers and horizontally scalable workers
+- Sandboxed execution of model-generated Python
+- PostgreSQL-backed workflow state and artifact metadata
+- Local and S3-backed object storage adapters
+- FastAPI APIs, server-sent event streaming, and a Next.js interface
+- Optional Cognito authentication and AWS infrastructure/CI scaffolding
+- Unit and integration testing across orchestration, agents, storage, sandboxing, routes, and graph validation
 
 ## Stack
 
-| Layer | Technology |
+| Area | Technology |
 |---|---|
-| Orchestration | a plain frontier walk over a persisted task graph |
-| Model | Anthropic Claude or OpenAI, by `LLM_PROVIDER` |
-| API | FastAPI |
-| Frontend | Next.js (App Router), Tailwind, shadcn/ui |
-| Persistence | PostgreSQL (runs, tasks), object store (datasets, artifacts) |
-| Execution | subprocess sandbox — rlimits, wall-clock timeout, no network |
-| Auth | Amazon Cognito via Amplify Gen 2 (optional) |
-| Infrastructure | AWS CDK — ECS Fargate behind an ALB, RDS, ElastiCache |
+| Agent runtime | OpenAI Agents SDK |
+| API | Python, FastAPI, SSE |
+| Workflow state | PostgreSQL, SQLAlchemy |
+| Messaging | SQS API via `boto3`; ElasticMQ locally |
+| Execution | Isolated subprocess sandbox, pandas, PyArrow, Matplotlib |
+| Artifact storage | Local filesystem or Amazon S3 |
+| Frontend | Next.js, React, TypeScript, Tailwind, shadcn/ui |
+| Authentication | Amazon Cognito through Amplify, optional locally |
+| Local runtime | Docker Compose |
+| Infrastructure | AWS CDK, ECS/Fargate, RDS, Amplify, ECR/GitHub Actions |
 
-## API
+## Read the engineering details
 
+- [`SUMMARY.md`](SUMMARY.md) — concise technical overview, architecture, reliability model, and tradeoffs
+- [`DESIGN.md`](DESIGN.md) — full implementation-level design and failure analysis
+
+## Current status
+
+The complete queue-backed workflow runs locally with Docker Compose: FastAPI, PostgreSQL, ElasticMQ, a deterministic orchestrator, and independently scalable task workers. Authentication can be disabled and artifact storage can remain local, so no AWS account is required for development.
+
+The repository also contains AWS CDK and CI/CD scaffolding. The full production topology and additional hardening—such as transactional outbox/reconciliation, worker leases, visibility heartbeats, and production load validation—remain documented follow-up work.
+
+---
+
+# Development
+
+## Prerequisites
+
+- Docker Desktop with Docker Compose
+- Python 3.11 and Pipenv for running tests or backend processes outside Docker
+- Node.js and `pnpm` for the frontend
+- An OpenAI API key
+
+## Quick start
+
+### 1. Configure the project
+
+From the repository root:
+
+```bash
+cp .env.example .env
+cp .env.backend.example .env.backend
+cp client/.env.local.example client/.env.local
 ```
-POST /datasets            CSV -> dataset profile
-POST /runs                question -> plan, parks in awaiting_approval
-POST /runs/{id}/approve   optionally {"drop": [...]}, then executes
-POST /runs/{id}/reject
-GET  /runs/{id}           task graph, for polling
-GET  /runs/{id}/artifacts what the run produced
-```
 
-## Environment
-
-Required settings are declared in `backend/app/settings.py` — the app fails fast
-at startup if any are missing. See `.env.example` for the full set; the ones that
-matter:
+Open `.env` and provide the only required external credential:
 
 ```env
-LLM_PROVIDER=openai            # or anthropic
-OPENAI_API_KEY=sk-...          # whichever provider you chose
-LLM_MODEL=                     # optional; defaults per provider
-DISABLE_AUTH=true              # no AWS needed
-STORAGE_BACKEND=local          # or s3
+OPENAI_API_KEY=sk-...
 ```
+
+The checked-in examples already configure local PostgreSQL, ElasticMQ, local artifact storage, and disabled authentication. No AWS credentials are required.
+
+### 2. Start the backend topology
+
+```bash
+docker compose up --build -d
+```
+
+This starts:
+
+- `backend` — FastAPI service
+- `orchestrator` — consumes run-advance messages and dispatches eligible DAG tasks
+- `worker` — consumes and executes analyst/synthesizer tasks
+- `postgres` — workflow and artifact metadata
+- `sqs` — ElasticMQ using the SQS wire protocol
+- `pgadmin` — optional database UI
+
+Follow the execution logs with:
+
+```bash
+docker compose logs -f backend orchestrator worker
+```
+
+### 3. Start the frontend
+
+In another terminal:
+
+```bash
+cd client
+pnpm install
+pnpm dev
+```
+
+Open **http://localhost:3000/wizard**, upload a CSV, and start a run.
+
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:3000 |
+| FastAPI | http://localhost:8001 |
+| OpenAPI docs | http://localhost:8001/docs |
+| ElasticMQ UI | http://localhost:9325 |
+| pgAdmin | http://localhost:5050 |
+
+## Scale task execution
+
+Tasks in the same DAG frontier are independent and can be handled by separate workers. Scale only the task-worker service:
+
+```bash
+docker compose up -d --scale worker=4
+```
+
+The orchestrator is intentionally lightweight; it reads persisted state, claims eligible tasks, publishes messages, and returns.
+
+## Useful commands
+
+```bash
+# Show running services
+docker compose ps
+
+# Follow all backend logs
+docker compose logs -f backend orchestrator worker sqs
+
+# Restart one component
+docker compose restart worker
+
+# Stop the stack while preserving Postgres and artifact volumes
+docker compose down
+
+# Remove the stack and all local data
+docker compose down -v
+```
+
+The application creates missing database tables at startup. It does not currently run schema migrations or alter existing tables, so use `docker compose down -v` after incompatible model/schema changes.
+
+
+## Configuration
+
+Important settings are declared in [`backend/settings.py`](backend/settings.py) and documented in [`.env.example`](.env.example).
+
+| Setting | Purpose | Local default |
+|---|---|---|
+| `OPENAI_API_KEY` | OpenAI credential | required |
+| `LLM_MODEL` | Model used by agents | `gpt-4o` |
+| `DISABLE_AUTH` | Bypass Cognito locally | `true` |
+| `STORAGE_BACKEND` | `local` or `s3` | `local` |
+| `QUEUE_ENDPOINT_URL` | ElasticMQ endpoint; empty uses AWS SQS | `http://sqs:9324` |
+| `MAX_TASK_ATTEMPTS` | Whole-task retry limit | `3` |
+| `MAX_CODE_ATTEMPTS` | Analyst rewrite/review rounds | `3` |
+| `SANDBOX_TIMEOUT_S` | Generated-code wall-clock limit | `60` |
+| `MAX_UPLOAD_BYTES` | Maximum accepted CSV size | `100 MiB` |
+
+The frontend reads `client/.env.local`, not the repository-root `.env`. Restart `pnpm dev` after changing any `NEXT_PUBLIC_*` value. `DISABLE_AUTH` and `NEXT_PUBLIC_DISABLE_AUTH` should agree.
 
 ## Tests
 
-```bash
-cd backend && pipenv install --dev && pipenv run pytest
-```
-
-319 tests. Most need nothing; the integration suite uses a real Postgres and
-skips cleanly without one (`docker compose up -d postgres`).
-
-## Deploying to AWS
-
-Optional — nothing above requires an account. Two CDK stacks in `infrastructure/`
-each provision a VPC, ECS Fargate service behind an ALB, RDS Postgres and an
-ElastiCache Redis replication group.
-
-**No custom domain is required.** Deploy as-is and the API is served over HTTP at
-the ALB DNS name, emitted as a stack output:
+Install backend development dependencies and run the suite:
 
 ```bash
-cd infrastructure && npm install
-npx cdk bootstrap
-npx cdk deploy AgenticsDevStack
+cd backend
+pipenv install --dev
+pipenv run pytest
 ```
 
-To serve HTTPS on a domain you own, pass an ACM certificate ARN — this is what
-adds the 443 listener:
+The suite covers DAG validation, orchestration transitions, planner and worker loops, artifact persistence, storage adapters, sandbox behavior, API routes, and data profiling. Unit tests run without credentials or containers; database-backed integration tests can use the local PostgreSQL service.
 
-```bash
-npx cdk deploy AgenticsDevStack -c certificateArn=arn:aws:acm:us-west-2:...
-```
-
-Other context values: `-c region=...`, `-c ecrRepository=...`, `-c llmProvider=...`.
-
-Before the first deploy: create the ECR repositories the task definitions expect
-(`agentics/fastapi-dev`, `agentics/fastapi-prod`), and a Secrets Manager secret
-named for whichever provider you use.
-
-### CI
-
-`.github/workflows/ecr-deploy-{dev,main}.yml` build the backend image, push to
-ECR and force a new ECS deployment on pushes to `dev` and `main`.
-
-| Kind | Name | Purpose |
-|---|---|---|
-| Secret | `AWS_DEPLOY_ROLE_ARN` | IAM role assumed via OIDC |
-| Variable | `ECR_REPOSITORY` | optional; defaults to `agentics/fastapi-{dev,prod}` |
-| Variable | `AWS_REGION` | optional; defaults to `us-west-2` |
-
-### Frontend (Amplify)
-
-1. Amplify → create app → GitHub, select this repo and branch
-2. Tick **My app is a monorepo**, root directory `client`
-3. Tick **My monorepo uses Amplify Gen2 backend**
-4. Set `NEXT_PUBLIC_BACKEND_URL` to the ALB DNS from the CDK output, plus the
-   other `NEXT_PUBLIC_*` values
-5. Optionally set `APP_URL` so invitation emails link back to the app
+The generated OpenAPI reference is available at `http://localhost:8001/docs` while the API is running.
 
 ## Repository layout
 
+```text
+├──backend/
+│  ├── server/                  FastAPI application and routers
+│  ├── workers/                 queue consumer, orchestrator, and task entry points
+│  ├── services/
+│  │   ├── agents/              planner and discoverable worker roles
+│  │   ├── dag_service.py       deterministic graph validation and frontier logic
+│  │   ├── orchestrator_service.py
+│  │   ├── artifact_service.py
+│  │   ├── run_service.py
+│  │   └── session_service.py
+│  ├── external/                PostgreSQL, SQS, storage, Cognito, LLM, sandbox
+│  ├── models/                  database, domain, and API models
+│  └── tests/                   unit and integration tests
+│
+├──client/                      Next.js demonstration interface
+├──docker/                      ElasticMQ configuration
+├──infrastructure/             AWS CDK stacks
+├──.github/workflows/           ECR/ECS deployment workflows
 ```
-backend/
-  app/services/graphs/   the agents: planner, analyst, critic, synthesizer
-  app/services/          dag, scope, validation, profile, metrics (pure);
-                         run, artifact, dataset, orchestrator, pipeline (IO)
-  app/services/dispatch/ the seam: in-process now, queue-backed later
-  app/external/          LLM, Cognito, Postgres, Redis, storage, sandbox
-  app/routers/           HTTP surface
-  migrations/            Alembic
-client/                  Next.js frontend
-infrastructure/          AWS CDK stacks (dev and prod)
-tests/                   Playwright and Artillery
-```
-
-## Design
-
-[`DESIGN.md`](DESIGN.md) covers the architecture and the reasoning: role
-decomposition, the task DAG and why its dependencies carry named artifacts, the
-validation stack, how agents share context, the staging toward distributed
-workers, and what was deliberately left out.
